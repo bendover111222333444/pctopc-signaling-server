@@ -118,6 +118,20 @@ export default {
 
     if (request.headers.get("Upgrade") !== "websocket") {
         
+        if (new URL(request.url).pathname === "/turn-creds") {
+
+            const creds = await fetch("https://speed.cloudflare.com/turn-creds")
+            const data = await creds.json()
+            
+            return new Response(JSON.stringify(data), {
+                headers: {
+                    "Content-Type": "application/json",
+                    "Access-Control-Allow-Origin": "*"
+                }
+            })
+            
+        }
+
         return new Response("Whoops your not on a websocket bogo", { status: 400 })
     
     }
