@@ -14,8 +14,6 @@ export class Room {
     const origin = request.headers.get("Origin");
     const headerCheck = origin === null || origin === "file://";
 
-    console.log(console.log(request.headers.get("Origin")));
-
     //two host check and client empty check
     if ((headerCheck == true && booleanCheck == false)) {
 
@@ -120,8 +118,18 @@ export default {
         
         if (new URL(request.url).pathname === "/turn-creds") {
 
-            const creds = await fetch("https://speed.cloudflare.com/turn-creds")
-            const data = await creds.json()
+            // i know this isnt ideal and i honstly dont know if its tos or not but i dont really have any choice as cloudflare turn requires an credit card which i dont have. please if your forking use the actual turn as it can and will be shut down
+            // also sorry cloudflare
+
+            const req = new Request("https://speed.cloudflare.com/turn-creds", {
+                headers: {
+                    "Origin": "https://speed.cloudflare.com",
+                    "Referer": "https://speed.cloudflare.com/"
+                }
+            });
+
+            const creds = await fetch(req);
+            const data = await creds.json();
             
             return new Response(JSON.stringify(data), {
                 headers: {
