@@ -6,7 +6,7 @@ export class Room {
   }
 
   async fetch(request) {
-    
+
     const [client, server] = Object.values(new WebSocketPair());
 
     const booleanCheck = this.firstClient == true;
@@ -14,7 +14,14 @@ export class Room {
     const origin = request.headers.get("Origin");
     const headerCheck = origin === null || origin === "file://";
 
-    //two host check and client empty check
+    const isHost = headerCheck && booleanCheck;
+
+    if (this.socket.has(false) && !isHost) {
+
+        return new Response("Client already connected", { status: 403 })
+    
+    }
+
     if ((headerCheck == true && booleanCheck == false)) {
 
         return new Response("Host already connected in this room", { status: 403 })
@@ -24,8 +31,6 @@ export class Room {
         return new Response("Cannot connect to empty room as client", { status: 403 })
     
     }
-
-    const isHost = headerCheck && booleanCheck;
 
     this.socket.set(isHost, server);
     server.accept();
@@ -39,11 +44,25 @@ export class Room {
         const target = this.socket.get(false);
        
         if (this.socketStore.offer !== null) {
+
             target.send(JSON.stringify({ type: "offer", actualData: this.socketStore.offer }))
+            
+        } else {
+                
+            const host = this.socket.get(true)
+                
+            if (host) {
+                    
+                host.send(JSON.stringify({ type: "clientConnected" }))
+                
+            }
+
         }
        
         if (this.socketStore.clientICE.length > 0) {
+
             target.send(JSON.stringify({ type: "ICE", actualData: this.socketStore.clientICE }))
+        
         }
     
     }
@@ -64,7 +83,15 @@ export class Room {
             } else if (isHost == true && data.type == "offer") {
             
                 this.socketStore.offer = data.actualData;
-            
+
+                const clientSocket = this.socket.get(false)
+
+                if (clientSocket) {
+
+                    clientSocket.send(msg.data)
+                
+                }
+
             } else if (target) {
             
                 target.send(msg.data);
@@ -92,6 +119,11 @@ export class Room {
                 this.socket.delete(false)
             
             }
+        
+        } else if (isHost == false) {
+        
+            this.socketStore = { offer: null, clientICE: [] }
+            this.socket.delete(false)
         
         }
     
