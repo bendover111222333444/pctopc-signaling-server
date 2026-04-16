@@ -72,6 +72,8 @@ export class Room {
         let hostOpp = !isHost;
         const data = JSON.parse(msg.data);
         
+        if (data.type === "ping") return;
+
         if (data.type && data.actualData) {
             
             const target = this.socket.get(hostOpp)
