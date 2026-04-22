@@ -167,6 +167,15 @@ wss.on('connection', (ws, req) => {
 
     const url = new URL(req.url, 'http://localhost')
     const roomId = url.searchParams.get('room')
+    const origin = req.headers.origin
+
+    // if (origin !== 'https://yoursite.com' && origin !== undefined) {
+    //     ws.close(1008, 'Unauthorized')
+    //     return
+    // }
+
+    // i know this isnt ideal and i honstly dont know if its tos or not but i dont really have any choice as cloudflare turn requires an credit card which i dont have. please if your forking use the actual turn as it can and will be shut down
+    // also sorry cloudflare
 
     if (!roomId) {
         ws.close(1008, 'missing name')

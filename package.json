@@ -1,0 +1,11 @@
+{
+    "name": "signaling-server",
+    "version": "1.0.0",
+    "main": "otherHosting.js",
+    "scripts": {
+        "start": "node otherHosting.js"
+    },
+    "dependencies": {
+        "ws": "^8.0.0"
+    }
+}

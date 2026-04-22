@@ -1,1 +1,1 @@
-i signal u you signal me now we be signaling :rage2:
+build from wrangler for cloudflare workers and build from root for anything else.
