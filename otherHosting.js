@@ -48,7 +48,7 @@ class Room {
     constructor() {
 
         this.socket = new Map()
-        this.socketStore = { offer: null, clientICE: [] }
+        this.socketStore = { offer: null}
         this.firstClient = true
     
     }
@@ -110,9 +110,9 @@ class Room {
             
             }
 
-            if (this.socketStore.clientICE.length > 0) {
-                target.send(JSON.stringify({ type: 'ICE', actualData: this.socketStore.clientICE }))
-            }
+            // if (this.socketStore.clientICE.length > 0) {
+            //     target.send(JSON.stringify({ type: 'ICE', actualData: this.socketStore.clientICE }))
+            // }
         }
 
         ws.on('message', (msg) => {
@@ -125,11 +125,7 @@ class Room {
 
                 const target = this.socket.get(!isHost)
 
-                if (isHost === true && data.type === 'ICE') {
-
-                    this.socketStore.clientICE.push(data.actualData)
-                
-                } else if (isHost === true && data.type === 'offer') {
+                if (isHost === true && data.type === 'offer') {
                     
                     this.socketStore.offer = data.actualData
                     
@@ -153,7 +149,7 @@ class Room {
             if (isHost === true) {
 
                 this.firstClient = true
-                this.socketStore = { offer: null, clientICE: [] }
+                this.socketStore = { offer: null}
 
                 const client = this.socket.get(false)
 
@@ -166,7 +162,7 @@ class Room {
 
             } else {
 
-                this.socketStore = { offer: null, clientICE: [] }
+                this.socketStore = { offer: null}
                 this.socket.delete(false)
 
                 const host = this.socket.get(true)
