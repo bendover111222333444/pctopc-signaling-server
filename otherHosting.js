@@ -62,8 +62,18 @@ class Room {
 
         if (this.socket.has(false) && !isHost) {
 
-            ws.close(1008, 'Client already connected')
-            return
+            const existing = this.socket.get(false)
+
+            if (existing && existing.readyState === WebSocket.OPEN) {
+
+                ws.close(1008, 'Client already connected')
+                return
+
+            } else {
+
+                this.socket.delete(false)
+
+            }
 
         }
 
@@ -82,8 +92,11 @@ class Room {
         this.socket.set(isHost, ws)
 
         if (this.firstClient === true) {
+
             this.firstClient = false
+
         } else {
+
             const target = this.socket.get(false)
 
             if (this.socketStore.offer !== null) {
@@ -141,22 +154,26 @@ class Room {
 
                 this.firstClient = true
                 this.socketStore = { offer: null, clientICE: [] }
-                
+
                 const client = this.socket.get(false)
+
                 if (client) {
-                    
+
                     client.close()
                     this.socket.delete(false)
-                
+
                 }
 
             } else {
-                
+
                 this.socketStore = { offer: null, clientICE: [] }
                 this.socket.delete(false)
-            
+
+                const host = this.socket.get(true)
+                if (host) host.send(JSON.stringify({ type: "clientDisconnected" }))
+
             }
-        
+
         })
 
     }

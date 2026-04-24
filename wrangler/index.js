@@ -18,8 +18,18 @@ export class Room {
 
     if (this.socket.has(false) && !isHost) {
 
-        return new Response("Client already connected", { status: 403 })
-    
+        const existing = this.socket.get(false)
+        
+        if (existing && existing.readyState === WebSocket.OPEN) {
+            
+            return new Response("Client already connected", { status: 403 })
+       
+        } else {
+            
+            this.socket.delete(false)
+        
+        }
+
     }
 
     if ((headerCheck == true && booleanCheck == false)) {
@@ -104,32 +114,35 @@ export class Room {
     
     });
 
-    server.addEventListener("close", () => {
+        server.addEventListener("close", () => {
 
-        this.socket.delete(isHost);
-        
-        if (isHost == true) {
+            this.socket.delete(isHost);
             
-            this.firstClient = true
-            this.socketStore = { offer: null, clientICE: [] }
-            
-            const client = this.socket.get(false)
-            
-            if (client) {
-                
-                client.close()
+            if (isHost == true) {
+
+                this.firstClient = true
+                this.socketStore = { offer: null, clientICE: [] }
+
+                const client = this.socket.get(false)
+
+                if (client) {
+
+                    client.close()
+                    this.socket.delete(false)
+
+                }
+
+            } else {
+
+                this.socketStore = { offer: null, clientICE: [] }
                 this.socket.delete(false)
-            
+
+                const host = this.socket.get(true)
+                if (host) host.send(JSON.stringify({ type: "clientDisconnected" }))
+
             }
-        
-        } else if (isHost == false) {
-        
-            this.socketStore = { offer: null, clientICE: [] }
-            this.socket.delete(false)
-        
-        }
-    
-    });
+            
+        });
 
     return new Response(null, { status: 101, webSocket: client });
 
