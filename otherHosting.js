@@ -48,7 +48,7 @@ class Room {
     constructor() {
 
         this.socket = new Map()
-        this.socketStore = { offer: null}
+        this.socketStore = { offer: null, clientICE: [] }
         this.firstClient = true
     
     }
@@ -62,18 +62,8 @@ class Room {
 
         if (this.socket.has(false) && !isHost) {
 
-            const existing = this.socket.get(false)
-
-            if (existing && existing.readyState === WebSocket.OPEN) {
-
-                ws.close(1008, 'Client already connected')
-                return
-
-            } else {
-
-                this.socket.delete(false)
-
-            }
+            ws.close(1008, 'Client already connected')
+            return
 
         }
 
@@ -92,11 +82,8 @@ class Room {
         this.socket.set(isHost, ws)
 
         if (this.firstClient === true) {
-
             this.firstClient = false
-
         } else {
-
             const target = this.socket.get(false)
 
             if (this.socketStore.offer !== null) {
@@ -110,9 +97,9 @@ class Room {
             
             }
 
-            // if (this.socketStore.clientICE.length > 0) {
-            //     target.send(JSON.stringify({ type: 'ICE', actualData: this.socketStore.clientICE }))
-            // }
+            if (this.socketStore.clientICE.length > 0) {
+                target.send(JSON.stringify({ type: 'ICE', actualData: this.socketStore.clientICE }))
+            }
         }
 
         ws.on('message', (msg) => {
@@ -125,7 +112,11 @@ class Room {
 
                 const target = this.socket.get(!isHost)
 
-                if (isHost === true && data.type === 'offer') {
+                if (isHost === true && data.type === 'ICE') {
+
+                    this.socketStore.clientICE.push(data.actualData)
+                
+                } else if (isHost === true && data.type === 'offer') {
                     
                     this.socketStore.offer = data.actualData
                     
@@ -149,27 +140,23 @@ class Room {
             if (isHost === true) {
 
                 this.firstClient = true
-                this.socketStore = { offer: null}
-
+                this.socketStore = { offer: null, clientICE: [] }
+                
                 const client = this.socket.get(false)
-
                 if (client) {
-
+                    
                     client.close()
                     this.socket.delete(false)
-
+                
                 }
 
             } else {
-
-                this.socketStore = { offer: null}
+                
+                this.socketStore = { offer: null, clientICE: [] }
                 this.socket.delete(false)
-
-                const host = this.socket.get(true)
-                if (host) host.send(JSON.stringify({ type: "clientDisconnected" }))
-
+            
             }
-
+        
         })
 
     }
