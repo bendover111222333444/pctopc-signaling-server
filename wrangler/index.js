@@ -1,7 +1,7 @@
 export class Room {
   constructor() {
     this.socket = new Map();
-    this.socketStore = {offer: null, clientICE: []};
+    this.socketStore = {offer: null};
     this.firstClient = true;
   }
 
@@ -43,11 +43,11 @@ export class Room {
        
         const target = this.socket.get(false);
        
-        if (this.socketStore.offer !== null) {
+            if (this.socketStore.offer !== null) {
 
-            target.send(JSON.stringify({ type: "offer", actualData: this.socketStore.offer }))
-            
-        } else {
+                target.send(JSON.stringify({ type: 'offer', actualData: this.socketStore.offer }))
+
+            } else {
                 
             const host = this.socket.get(true)
                 
@@ -57,12 +57,6 @@ export class Room {
                 
             }
 
-        }
-       
-        if (this.socketStore.clientICE.length > 0) {
-
-            target.send(JSON.stringify({ type: "ICE", actualData: this.socketStore.clientICE }))
-        
         }
     
     }
@@ -78,11 +72,7 @@ export class Room {
             
             const target = this.socket.get(hostOpp)
             
-            if (isHost == true && data.type == "ICE") {
-            
-                this.socketStore.clientICE.push(data.actualData)
-            
-            } else if (isHost == true && data.type == "offer") {
+            if (isHost == true && data.type == "offer") {
             
                 this.socketStore.offer = data.actualData;
 
@@ -111,7 +101,7 @@ export class Room {
         if (isHost == true) {
             
             this.firstClient = true
-            this.socketStore = { offer: null, clientICE: [] }
+            this.socketStore = { offer: null}
             
             const client = this.socket.get(false)
             
@@ -124,7 +114,7 @@ export class Room {
         
         } else if (isHost == false) {
         
-            this.socketStore = { offer: null, clientICE: [] }
+            this.socketStore = { offer: null}
             this.socket.delete(false)
         
         }
