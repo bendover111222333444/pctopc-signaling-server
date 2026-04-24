@@ -53,7 +53,7 @@ class Room {
     
     }
 
-    handleConnection(ws, origin) {
+    handleConnection(ws, origin, roomId) {
 
         const booleanCheck = this.firstClient === true
         const headerCheck = origin === null || origin === 'file://' || origin === undefined
@@ -136,20 +136,24 @@ class Room {
                 this.socketStore = { offer: null }
                 
                 const client = this.socket.get(false)
+                
                 if (client) {
-                    
                     client.close()
                     this.socket.delete(false)
-                
                 }
 
+                rooms.delete(roomId)
+
             } else {
-                
+
                 this.socketStore = { offer: null }
                 this.socket.delete(false)
-            
+                
+                const host = this.socket.get(true)
+                if (host) host.send(JSON.stringify({ type: 'clientDisconnected' }))
+
             }
-        
+
         })
 
     }
@@ -182,7 +186,7 @@ wss.on('connection', (ws, req) => {
     }
 
     const room = rooms.get(roomId)
-    room.handleConnection(ws, req.headers.origin)
+    room.handleConnection(ws, req.headers.origin, roomId)
 
 })
 
