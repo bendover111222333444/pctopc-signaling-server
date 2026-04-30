@@ -40,25 +40,19 @@ export class Room {
         this.firstClient = false;
     
     } else {
-       
+        
         const target = this.socket.get(false);
-       
-            if (this.socketStore.offer !== null) {
-
-                target.send(JSON.stringify({ type: 'offer', actualData: this.socketStore.offer }))
-
-            } else {
-                
-            const host = this.socket.get(true)
-                
-            if (host) {
-                    
-                host.send(JSON.stringify({ type: "clientConnected" }))
-                
-            }
-
+            
+        if (this.socketStore.offer !== null) {
+            
+            target.send(JSON.stringify({ type: 'offer', actualData: this.socketStore.offer }))
+        
         }
-    
+            
+        const host = this.socket.get(true)
+        if (host) host.send(JSON.stringify({ type: 'clientConnected' }))
+        
+            
     }
 
     server.addEventListener("message", msg => {
@@ -116,6 +110,9 @@ export class Room {
         
             this.socketStore = { offer: null}
             this.socket.delete(false)
+
+            const host = this.socket.get(true)
+            if (host) host.send(JSON.stringify({ type: 'clientDisconnected' }))
         
         }
     

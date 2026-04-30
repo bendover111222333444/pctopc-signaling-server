@@ -2,6 +2,12 @@ const WebSocket = require('ws')
 const http = require('http')
 const https = require('https')
 
+const selfPingTime = 600_000;
+const signalingWorker = "signaling.bendover111222333444.great-site.net"
+
+let activeConnections = 0;
+let keepAliveInterval = null;
+
 const server = http.createServer(async (req, res) => {
 
     if (req.url === '/turn-creds') {
@@ -84,18 +90,17 @@ class Room {
         if (this.firstClient === true) {
             this.firstClient = false
         } else {
+            
             const target = this.socket.get(false)
 
             if (this.socketStore.offer !== null) {
-
+            
                 target.send(JSON.stringify({ type: 'offer', actualData: this.socketStore.offer }))
             
-            } else {
-                
-                const host = this.socket.get(true)
-                if (host) host.send(JSON.stringify({ type: 'clientConnected' }))
-            
             }
+
+            const host = this.socket.get(true)
+            if (host) host.send(JSON.stringify({ type: 'clientConnected' }))
 
         }
 
@@ -127,6 +132,15 @@ class Room {
         })
 
         ws.on('close', () => {
+
+            activeConnections--;
+        
+            if (activeConnections === 0) {
+            
+                clearInterval(keepAliveInterval)
+                keepAliveInterval = null
+        
+            }
 
             this.socket.delete(isHost)
 
@@ -173,6 +187,18 @@ wss.on('connection', (ws, req) => {
 
     // i know this isnt ideal and i honstly dont know if its tos or not but i dont really have any choice as cloudflare turn requires an credit card which i dont have. please if your forking use the actual turn as it can and will be shut down
     // also sorry cloudflare
+
+    activeConnections++;
+    
+    if (keepAliveInterval === null) {
+        
+        keepAliveInterval = setInterval(() => {
+            
+            http.get(`http://${signalingWorker}`, () => {})
+        
+        }, selfPingTime)
+    
+    }
 
     if (!roomId) {
         ws.close(1008, 'missing name')
