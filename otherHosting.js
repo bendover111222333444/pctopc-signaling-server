@@ -3,7 +3,6 @@ const http = require('http')
 const https = require('https')
 
 const selfPingTime = 600_000;
-const signalingWorker = "signaling.bendover111222333444.great-site.net"
 
 let activeConnections = 0;
 let keepAliveInterval = null;
@@ -194,7 +193,7 @@ wss.on('connection', (ws, req) => {
         
         keepAliveInterval = setInterval(() => {
             
-            http.get(`http://${signalingWorker}`, () => {})
+            http.get(`http://localhost:${process.env.PORT || 3000}`, () => {})
         
         }, selfPingTime)
     
