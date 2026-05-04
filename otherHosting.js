@@ -2,6 +2,8 @@ const WebSocket = require('ws')
 const http = require('http')
 const https = require('https')
 
+const pingTime = 30_000
+
 const server = http.createServer(async (req, res) => {
 
     if (req.url === '/turn-creds') {
@@ -34,7 +36,7 @@ const server = http.createServer(async (req, res) => {
 
     }
 
-    res.writeHead(400)
+    res.writeHead(200)
     res.end('Whoops your not on a websocket bogo')
 
 })
@@ -159,7 +161,24 @@ class Room {
 
 }
 
+const interval = setInterval(() => {
+    
+    wss.clients.forEach(ws => {
+        
+        if (ws.isAlive === false) return ws.terminate()
+        ws.isAlive = false
+        ws.ping()
+    
+    })
+
+}, pingTime)
+
+wss.on('close', () => clearInterval(interval))
+
 wss.on('connection', (ws, req) => {
+
+    ws.isAlive = true
+    ws.on('pong', () => ws.isAlive = true)
 
     const url = new URL(req.url, 'http://localhost')
     const roomId = url.searchParams.get('room')
