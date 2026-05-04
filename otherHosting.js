@@ -2,11 +2,6 @@ const WebSocket = require('ws')
 const http = require('http')
 const https = require('https')
 
-const selfPingTime = 600_000;
-
-let activeConnections = 0;
-let keepAliveInterval = null;
-
 const server = http.createServer(async (req, res) => {
 
     if (req.url === '/turn-creds') {
@@ -132,15 +127,6 @@ class Room {
 
         ws.on('close', () => {
 
-            activeConnections--;
-        
-            if (activeConnections === 0) {
-            
-                clearInterval(keepAliveInterval)
-                keepAliveInterval = null
-        
-            }
-
             this.socket.delete(isHost)
 
             if (isHost === true) {
@@ -186,18 +172,6 @@ wss.on('connection', (ws, req) => {
 
     // i know this isnt ideal and i honstly dont know if its tos or not but i dont really have any choice as cloudflare turn requires an credit card which i dont have. please if your forking use the actual turn as it can and will be shut down
     // also sorry cloudflare
-
-    activeConnections++;
-    
-    if (keepAliveInterval === null) {
-        
-        keepAliveInterval = setInterval(() => {
-            
-            http.get(`http://localhost:${process.env.PORT || 3000}`, () => {})
-        
-        }, selfPingTime)
-    
-    }
 
     if (!roomId) {
         ws.close(1008, 'missing name')
