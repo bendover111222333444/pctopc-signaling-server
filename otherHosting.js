@@ -36,7 +36,7 @@ const server = http.createServer(async (req, res) => {
 
     }
 
-    res.writeHead(200)
+    res.writeHead(400)
     res.end('Whoops your not on a websocket bogo')
 
 })
