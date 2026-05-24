@@ -126,8 +126,32 @@ const server = http.createServer(async (req, res) => {
 
 })
 
-const wss = new WebSocket.Server({ server })
-const chatWss = new WebSocket.Server({ server, path: '/chat' })
+const wss = new WebSocket.Server({ noServer: true })
+const chatWss = new WebSocket.Server({ noServer: true })
+
+server.on('upgrade', (req, socket, head) => {
+
+    const url = new URL(req.url, 'http://localhost')
+
+    if (url.pathname === '/chat') {
+
+        chatWss.handleUpgrade(req, socket, head, (ws) => {
+
+            chatWss.emit('connection', ws, req)
+
+        })
+
+    } else {
+
+        wss.handleUpgrade(req, socket, head, (ws) => {
+
+            wss.emit('connection', ws, req)
+
+        })
+
+    }
+    
+})
 
 const rooms = new Map()
 const chatRooms = new Map()
