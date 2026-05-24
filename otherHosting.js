@@ -447,3 +447,9 @@ wss.on('connection', (ws, req) => {
     room.handleConnection(ws, origin, roomId)
 
 })
+
+server.listen(process.env.PORT || 3000, () => {
+
+    console.log('Server has turned tf on')
+
+})
