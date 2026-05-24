@@ -1,8 +1,93 @@
 const WebSocket = require('ws')
 const http = require('http')
 const https = require('https')
+const bcrypt = require('bcrypt')
 
 const pingTime = 30_000
+const maxMsgLength = 200;
+
+const SQLURL = process.env.SQLURL
+const SQLTOKEN = process.env.SQLTOKEN
+const SERVERURL = process.env.SERVERURL
+
+// Todo:
+
+// add rate limitimg
+
+async function query(sql, args = []) {
+
+    const res = await fetch(`https://${SQLURL}/v2/pipeline`, {
+        
+        method: 'POST',
+        headers: {
+            
+            'Authorization': `Bearer ${SQLTOKEN}`,
+            'Content-Type': 'application/json'
+
+        },
+
+        body: JSON.stringify({
+            
+            requests: [{ type: 'execute', stmt: { sql, args } }]
+        
+        })
+
+    })
+
+    const data = await res.json()
+    return data.results[0].response.result
+
+}
+
+(async () => {
+
+    await query('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, password TEXT NOT NULL)')
+    await query('CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL, message TEXT NOT NULL, roomId TEXT NOT NULL, timestamp INTEGER NOT NULL)')
+
+})()
+
+async function registerUser(username, password) {
+    
+    const result = await(query('SELECT * FROM users WHERE username = ?', [username]))
+    const exists = result.rows[0]
+
+    if (exists) return false
+
+    const hash = await bcrypt.hash(password, 10)
+
+    await(query('INSERT INTO users (username, password) VALUES (?, ?)', [username, hash]))
+
+    return true
+}
+
+async function loginUser(username, password) {
+    
+    const result = await query('SELECT * FROM users WHERE username = ?', [username])
+    const user = result.rows[0]
+        
+    if (!user) return false
+    return await bcrypt.compare(password, user.password)
+
+}
+
+async function getChats(roomId) {
+    
+    const result = await query('SELECT * FROM messages WHERE roomId = ? ORDER BY timestamp ASC', [roomId])
+    return result || []
+
+}
+
+async function saveMessage(roomId, username, message) {
+    
+    await query('INSERT INTO messages (roomId, username, message, timestamp) VALUES (?, ?, ?, ?)', [roomId, username, message, Date.now()]);
+
+}
+
+async function clearMessages(roomId) {
+
+    await query('DELETE FROM messages WHERE roomId = ?', [roomId])
+
+}
 
 const server = http.createServer(async (req, res) => {
 
@@ -36,14 +121,16 @@ const server = http.createServer(async (req, res) => {
 
     }
 
-    res.writeHead(400)
+    res.writeHead(200)
     res.end('Whoops your not on a websocket bogo')
 
 })
 
 const wss = new WebSocket.Server({ server })
+const chatWss = new WebSocket.Server({ server, path: '/chat' })
 
 const rooms = new Map()
+const chatRooms = new Map()
 
 class Room {
 
@@ -84,7 +171,9 @@ class Room {
         this.socket.set(isHost, ws)
 
         if (this.firstClient === true) {
+
             this.firstClient = false
+            
         } else {
             
             const target = this.socket.get(false)
@@ -161,6 +250,78 @@ class Room {
 
 }
 
+class ChatRoom {
+
+    constructor(roomId) {
+        
+        this.clients = new Map()
+        this.roomId = roomId
+
+    }
+
+    async join(ws, username, password) {
+        
+        const getUser = this.clients.get(username)
+
+        if (!getUser && await loginUser(username, password) === true) {
+
+            this.clients.set(username, ws)
+
+        }
+    
+    }
+
+    async broadcast(username, msg) {
+        
+        const getUser = this.clients.get(username)
+
+        if (getUser) {
+
+            this.clients.forEach((socket) => {
+                
+                if (socket.readyState === WebSocket.OPEN && socket != getUser) {
+
+                    socket.send(JSON.stringify({type: "msg", roomId: this.roomId, actualData: msg}));
+                
+                }
+
+            })
+
+            await saveMessage(this.roomId, username, msg)
+        
+        }
+
+    }
+
+    leave(username) {
+
+        const getUser = this.clients.get(username)
+
+        if (getUser) {
+
+           this.clients.delete(username)
+
+        }
+    
+    }
+
+    disconnect(ws) {
+
+        for (const [username, socket] of this.clients) {
+            
+            if (socket === ws) {
+                
+                this.clients.delete(username)
+                break
+            
+            }
+
+        }
+
+    }
+
+}
+
 const interval = setInterval(() => {
     
     wss.clients.forEach(ws => {
@@ -173,7 +334,87 @@ const interval = setInterval(() => {
 
 }, pingTime)
 
+const chatInterval = setInterval(() => {
+    
+    chatWss.clients.forEach(ws => {
+        
+        if (ws.isAlive === false) return ws.terminate()
+        ws.isAlive = false
+        ws.ping()
+    
+    })
+
+}, pingTime)
+
+chatWss.on('close', () => clearInterval(interval))
 wss.on('close', () => clearInterval(interval))
+
+chatWss.on('connection', (ws, req) => {
+
+    ws.isAlive = true
+    ws.on('pong', () => ws.isAlive = true)
+
+    const url = new URL(req.url, 'http://localhost')
+    const joinedRooms = new Set()
+
+    // if (origin !== SERVERURL && origin !== undefined) {
+    //     ws.close(1008, 'Unauthorized')
+    //     return
+    // }
+
+    ws.on('message', async (msg) => {
+
+        try {
+
+            const data = JSON.parse(msg)
+
+            if (data.roomId) {
+                
+                if (!chatRooms.has(data.roomId)) {
+
+                    chatRooms.set(data.roomId, new ChatRoom(data.roomId))
+        
+                }
+
+                const chatRoom = chatRooms.get(data.roomId)
+                const hasJoined = chatRoom.clients.has(data.username);
+
+                if (data.type === 'join' && data.username && data.password) {
+                    
+                    await chatRoom.join(ws, data.username, data.password);
+                    joinedRooms.add(chatRoom);
+                
+                } else if (data.type === 'leave' && data.username && hasJoined) {
+                    
+                    chatRoom.leave(data.username)
+                
+                } else if (data.type === 'msg' && data.username && data.msg && data.msg.length <= maxMsgLength && hasJoined) {
+                
+                    await chatRoom.broadcast(data.username, `<${data.username}> ${data.msg}`);
+                
+                } else if (data.type === 'register' && data.username && data.password) {
+
+                    await registerUser(data.username, data.password)
+
+                }
+
+            }
+
+        } catch (err) {
+
+            ws.close(1008, 'Invalid message')
+            
+        }
+
+    });
+
+    ws.on('close', () => {
+
+        joinedRooms.forEach(room => room.disconnect(ws))
+    
+    })
+
+})
 
 wss.on('connection', (ws, req) => {
 
@@ -184,18 +425,17 @@ wss.on('connection', (ws, req) => {
     const roomId = url.searchParams.get('room')
     const origin = req.headers.origin
 
-    // if (origin !== 'https://yoursite.com' && origin !== undefined) {
+    if (!roomId) {
+
+        ws.close(1008, 'missing room name')
+        return
+
+    }
+
+    // if (origin !== SERVERURL && origin !== undefined) {
     //     ws.close(1008, 'Unauthorized')
     //     return
     // }
-
-    // i know this isnt ideal and i honstly dont know if its tos or not but i dont really have any choice as cloudflare turn requires an credit card which i dont have. please if your forking use the actual turn as it can and will be shut down
-    // also sorry cloudflare
-
-    if (!roomId) {
-        ws.close(1008, 'missing name')
-        return
-    }
 
     if (!rooms.has(roomId)) {
 
@@ -204,12 +444,6 @@ wss.on('connection', (ws, req) => {
     }
 
     const room = rooms.get(roomId)
-    room.handleConnection(ws, req.headers.origin, roomId)
-
-})
-
-server.listen(process.env.PORT || 3000, () => {
-    
-    console.log('Server running on port', process.env.PORT || 3000)
+    room.handleConnection(ws, origin, roomId)
 
 })

@@ -64,6 +64,8 @@ async function clearMessages(env, roomId) {
 
 }
 
+const maxMsgLength = 200
+
 export class Room {
 
     constructor(state, env) {
@@ -202,46 +204,66 @@ export class ChatRoom {
         const url = new URL(request.url)
         const roomId = url.searchParams.get('room')
         const env = this.env
+        const joinedRooms = new Set()
 
         server.accept();
 
         server.addEventListener("message", async msg => {
 
-            const data = JSON.parse(msg.data)
+            try {
 
-            if (data.type === 'join') {
+                const data = JSON.parse(msg.data)
 
-                const getUser = this.clients.get(data.username)
+                if (data.roomId) {
 
-                if (!getUser && await loginUser(env, data.username, data.password) === true) {
+                    const hasJoined = this.clients.has(data.username)
 
-                    this.clients.set(data.username, server)
+                    if (data.type === 'join' && data.username && data.password) {
 
-                }
+                        const getUser = this.clients.get(data.username)
 
-            } else if (data.type === 'leave') {
+                        if (!getUser && await loginUser(env, data.username, data.password) === true) {
 
-                this.clients.delete(data.username)
-
-            } else if (data.type === 'msg') {
-
-                const getUser = this.clients.get(data.username)
-
-                if (getUser) {
-
-                    this.clients.forEach((socket) => {
-
-                        if (socket.readyState === WebSocket.OPEN) {
-
-                            socket.send(JSON.stringify({ type: "msg", roomId: roomId, actualData: data.message }));
+                            this.clients.set(data.username, server)
+                            joinedRooms.add(this)
 
                         }
 
-                    })
+                    } else if (data.type === 'leave' && data.username && hasJoined) {
 
-                    await saveMessage(env, roomId, data.username, data.message)
+                        this.clients.delete(data.username)
+
+                    } else if (data.type === 'msg' && data.username && data.msg && data.msg.length <= maxMsgLength && hasJoined) {
+
+                        const getUser = this.clients.get(data.username)
+
+                        if (getUser) {
+
+                            this.clients.forEach((socket) => {
+
+                                if (socket.readyState === WebSocket.OPEN && socket !== getUser) {
+
+                                    socket.send(JSON.stringify({ type: "msg", roomId: roomId, actualData: `<${data.username}> ${data.msg}` }));
+
+                                }
+
+                            })
+
+                            await saveMessage(env, roomId, data.username, `<${data.username}> ${data.msg}`)
+
+                        }
+
+                    } else if (data.type === 'register' && data.username && data.password) {
+
+                        await registerUser(env, data.username, data.password)
+
+                    }
 
                 }
+
+            } catch (err) {
+
+                server.close(1008, 'Invalid message')
 
             }
 
@@ -272,19 +294,9 @@ export default {
 
     async fetch(request, env) {
 
-        //const origin = request.headers.get("Origin")
-        //if (origin !== env.ALLOWED_ORIGIN && origin !== null) {
-
-            //return new Response("You requested to my cloudflare server no sirrie. \nIf you forked this yourself please go to /js/wrangler.toml and under vars change ALLOWED_ORGIN to a worker hosting your signaling server", { status: 403 })
-
-        //}
-
         if (request.headers.get("Upgrade") !== "websocket") {
 
             if (new URL(request.url).pathname === "/turn-creds") {
-
-                // i know this isnt ideal and i honstly dont know if its tos or not but i dont really have any choice as cloudflare turn requires an credit card which i dont have. please if your forking use the actual turn as it can and will be shut down
-                // also sorry cloudflare
 
                 const req = new Request("https://speed.cloudflare.com/turn-creds", {
                     headers: {
