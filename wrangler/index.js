@@ -48,13 +48,20 @@ async function loginUser(env, username, password) {
 async function getChats(env, roomId) {
 
     const result = await env.DB.prepare('SELECT * FROM messages WHERE roomId = ? ORDER BY timestamp ASC').bind(roomId).all()
-    return result.results || []
+    return (result.results || []).map(row => ({
+
+        roomId: row.roomId,
+        username: row.username,
+        message: row.message,
+        timestamp: row.timestamp
+
+    }))
 
 }
 
-async function saveMessage(env, roomId, username, message) {
+async function saveMessage(env, roomId, username, message, timestamp) {
 
-    await env.DB.prepare('INSERT INTO messages (roomId, username, message, timestamp) VALUES (?, ?, ?, ?)').bind(roomId, username, message, Date.now()).run()
+    await env.DB.prepare('INSERT INTO messages (roomId, username, message, timestamp) VALUES (?, ?, ?, ?)').bind(roomId, username, message, timestamp).run()
 
 }
 
@@ -64,7 +71,11 @@ async function clearMessages(env, roomId) {
 
 }
 
-const maxMsgLength = 200
+const maxWssMessageLength = 100_000;
+const maxMsgLength = 200;
+const maxUsernameLength = 60;
+const maxPasswordLength = 60;
+const maxRoomIdLength = 100;
 
 export class Room {
 
@@ -79,7 +90,7 @@ export class Room {
 
         const [client, server] = Object.values(new WebSocketPair());
 
-        const booleanCheck = this.firstClient == true;
+        const booleanCheck = this.firstClient === true;
 
         const origin = request.headers.get("Origin");
         const headerCheck = origin === null || origin === "file://";
@@ -92,11 +103,11 @@ export class Room {
 
         }
 
-        if ((headerCheck == true && booleanCheck == false)) {
+        if (headerCheck === true && booleanCheck === false) {
 
             return new Response("Host already connected in this room", { status: 403 })
         
-        } else if ((booleanCheck == true && headerCheck == false)) {
+        } else if (booleanCheck === true && headerCheck === false) {
             
             return new Response("Cannot connect to empty room as client", { status: 403 })
        
@@ -105,7 +116,7 @@ export class Room {
         this.socket.set(isHost, server);
         server.accept();
 
-        if (this.firstClient == true) {
+        if (this.firstClient === true) {
             
             this.firstClient = false;
         
@@ -126,16 +137,23 @@ export class Room {
 
         server.addEventListener("message", msg => {
 
-            let hostOpp = !isHost;
-            const data = JSON.parse(msg.data);
+            if (msg.data.length > maxWssMessageLength) return
+
+            let data;
+
+            try {
+
+                data = JSON.parse(msg.data)
+
+            } catch (err) { return }
 
             if (data.type === "ping") return;
 
-            if (data.type && data.actualData) {
+            if (data.type && data.actualData && typeof data.actualData === 'object') {
                 
-                const target = this.socket.get(hostOpp)
+                const target = this.socket.get(!isHost)
                 
-                if (isHost == true && data.type == "offer") {
+                if (isHost === true && data.type === "offer") {
                 
                     this.socketStore.offer = data.actualData;
                 
@@ -156,7 +174,7 @@ export class Room {
 
             this.socket.delete(isHost);
 
-            if (isHost == true) {
+            if (isHost === true) {
                 
                 this.firstClient = true
                 this.socketStore = { offer: null }
@@ -170,7 +188,7 @@ export class Room {
                 
                 }
             
-            } else if (isHost == false) {
+            } else if (isHost === false) {
             
                 this.socketStore = { offer: null }
                 this.socket.delete(false)
@@ -194,8 +212,27 @@ export class ChatRoom {
     constructor(state, env) {
     
         this.clients = new Map();
+        this.messages = [];
+        this.loaded = false;
+        this.loading = false;
         this.env = env;
     
+    }
+
+    async ensureLoaded(roomId) {
+
+        if (this.loaded) return
+        if (this.loading) return this.loading
+
+        this.loading = getChats(this.env, roomId).then(msgs => {
+
+            this.messages = msgs
+            this.loaded = true
+
+        })
+
+        return this.loading
+
     }
 
     async fetch(request) {
@@ -214,48 +251,94 @@ export class ChatRoom {
 
                 const data = JSON.parse(msg.data)
 
-                if (data.roomId) {
+                if (data.roomId && typeof data.roomId === 'string' && data.roomId.length <= maxRoomIdLength) {
+
+                    await this.ensureLoaded(data.roomId)
 
                     const hasJoined = this.clients.has(data.username)
 
-                    if (data.type === 'join' && data.username && data.password) {
+                    if (data.type === 'join' && data.username && data.password && typeof data.username === 'string' && typeof data.password === 'string' && data.username.length <= maxUsernameLength && data.password.length <= maxPasswordLength) {
 
                         const getUser = this.clients.get(data.username)
+                        const userLoggedIn = await loginUser(env, data.username, data.password)
+                        let done = false;
 
-                        if (!getUser && await loginUser(env, data.username, data.password) === true) {
+                        if (!getUser && userLoggedIn === true) {
 
                             this.clients.set(data.username, server)
                             joinedRooms.add(this)
+                            server.send(JSON.stringify({type: "getMsg", msgObj: this.messages}))
+                            done = true;
+
+                        } else if (getUser) {
+
+                            server.send(JSON.stringify({type: "error", error: "userAlreadyJoined"}));
+
+                        } else if (userLoggedIn === false) {
+
+                            server.send(JSON.stringify({type: "error", error: "userInvalidCredentials"}));
 
                         }
 
-                    } else if (data.type === 'leave' && data.username && hasJoined) {
+                        server.send(JSON.stringify({type: "conf", confType: "joined", confBoolean: done}));
 
-                        this.clients.delete(data.username)
-
-                    } else if (data.type === 'msg' && data.username && data.msg && data.msg.length <= maxMsgLength && hasJoined) {
+                    } else if (data.type === 'leave' && data.username && typeof data.username === 'string' && data.username.length <= maxUsernameLength && hasJoined) {
 
                         const getUser = this.clients.get(data.username)
+                        let done = false;
 
-                        if (getUser) {
+                        if (getUser && getUser === server) {
+
+                            this.clients.delete(data.username)
+                            done = true;
+
+                        }
+
+                        server.send(JSON.stringify({type: "conf", confType: "leave", confBoolean: done}));
+
+                    } else if (data.type === 'msg' && data.username && data.msg && typeof data.username === 'string' && typeof data.msg === 'string' && data.msg.length <= maxMsgLength && data.username.length <= maxUsernameLength && hasJoined) {
+
+                        const getUser = this.clients.get(data.username)
+                        let done = false;
+
+                        if (getUser && getUser === server) {
+
+                            const finalMsg = `<${data.username}> ${data.msg}`
+                            const timestamp = Date.now()
+                            const messageObject = {roomId: data.roomId, username: data.username, message: finalMsg, timestamp: timestamp}
+
+                            this.messages.push(messageObject);
+
+                            await saveMessage(env, data.roomId, data.username, finalMsg, timestamp)
 
                             this.clients.forEach((socket) => {
 
-                                if (socket.readyState === WebSocket.OPEN && socket !== getUser) {
+                                if (socket !== server) {
 
-                                    socket.send(JSON.stringify({ type: "msg", roomId: roomId, actualData: `<${data.username}> ${data.msg}` }));
+                                    socket.send(JSON.stringify({type: "msg", roomId: data.roomId, msgObj: messageObject}));
 
                                 }
 
                             })
 
-                            await saveMessage(env, roomId, data.username, `<${data.username}> ${data.msg}`)
+                            done = true;
+
+                        } else {
+
+                            server.send(JSON.stringify({type: "error", error: "userNotJoined"}));
 
                         }
 
-                    } else if (data.type === 'register' && data.username && data.password) {
+                        server.send(JSON.stringify({type: "conf", confType: "broadcast", confBoolean: done}));
 
-                        await registerUser(env, data.username, data.password)
+                    } else if (data.type === 'register' && data.username && data.password && typeof data.username === 'string' && typeof data.password === 'string' && data.username.length <= maxUsernameLength && data.password.length <= maxPasswordLength) {
+
+                        const registered = await registerUser(env, data.username, data.password)
+                        server.send(JSON.stringify({type: "conf", confType: "registered", confBoolean: registered}));
+
+                    } else {
+
+                        server.send(JSON.stringify({type: "error", error: 'requestLongOrMissArg'}));
 
                     }
 
@@ -327,6 +410,10 @@ export default {
 
         if (!roomId) {
             return new Response("missing name", { status: 400 });
+        }
+
+        if (typeof roomId === 'string' && roomId.length > maxRoomIdLength) {
+            return new Response("roomId too big", { status: 400 });
         }
 
         if (path === '/chat') {
