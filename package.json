@@ -6,7 +6,20 @@
         "start": "node otherHosting.js"
     },
     "dependencies": {
-        "ws": "^8.0.0",
-        "bcrypt": "^5.1.0"
+        "bcrypt": "^5.1.0",
+        "dompurify": "^3.4.13",
+        "jsdom": "^30.0.1",
+        "mongo-sanitize": "^1.1.0",
+        "ws": "^8.0.0"
+    },
+    "devDependencies": {
+        "@types/bcrypt": "^6.0.0",
+        "@types/dompurify": "^3.0.5",
+        "@types/jsdom": "^30.0.0",
+        "@types/node": "^26.2.0",
+        "@types/ws": "^8.18.1"
+    },
+    "allowScripts": {
+        "bcrypt@5.1.1": true
     }
-} 
+}
