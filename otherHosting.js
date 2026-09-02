@@ -10,6 +10,8 @@ const maxUsernameLength = 60;
 const maxPasswordLength = 60;
 const maxRoomIdLength = 100;
 
+const mainChatRoom = "MainRoom"
+
 const SQLURL = process.env.SQLURL
 const SQLTOKEN = process.env.SQLTOKEN
 const SERVERURL = process.env.SERVERURL
@@ -45,6 +47,7 @@ async function query(sql, args = []) {
 
 (async () => {
 
+    await query('CREATE TABLE IF NOT EXISTS user_rooms (username TEXT NOT NULL, roomId TEXT NOT NULL, PRIMARY KEY (username, roomId))')
     await query('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, password TEXT NOT NULL)')
     await query('CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL, message TEXT NOT NULL, roomId TEXT NOT NULL, timestamp INTEGER NOT NULL)')
     await query('CREATE INDEX IF NOT EXISTS idx_roomId ON messages (roomId)')
@@ -80,7 +83,6 @@ async function getChats(roomId) {
     const result = await query('SELECT * FROM messages WHERE roomId = ? ORDER BY timestamp ASC', [roomId])
     return (result.rows || []).map(row => ({
 
-        roomId: row[3],
         username: row[1],
         message: row[2],
         timestamp: row[4]
@@ -98,6 +100,32 @@ async function saveMessage(roomId, username, message, timestamp) {
 async function clearMessages(roomId) {
 
     await query('DELETE FROM messages WHERE roomId = ?', [roomId])
+
+}
+
+async function addRoom(username, roomId) {
+
+    if (this.roomId !== mainChatRoom) {
+
+        const exists = await query('SELECT * FROM user_rooms WHERE username = ? AND roomId = ?', [username, roomId])
+        if (exists.rows[0]) return false
+        await query('INSERT INTO user_rooms (username, roomId) VALUES (?, ?)', [username, roomId])
+        return true
+    
+    }
+
+}
+
+async function getRooms(username) {
+
+    const result = await query('SELECT roomId FROM user_rooms WHERE username = ?', [username])
+    return result.rows.map(row => row[0])
+
+}
+
+async function removeRoom(username, roomId) {
+    
+    await query('DELETE FROM user_rooms WHERE username = ? AND roomId = ?', [username, roomId])
 
 }
 
@@ -237,9 +265,9 @@ class Room {
             
             } catch (err) { return }
 
-            if (data.type === 'ping') return
+            if (data.type && typeof data.type === 'string' && data.actualData && typeof data.actualData === 'object') {
 
-            if (data.type && data.actualData && typeof data.actualData === 'object') {
+                if (data.type === 'ping') return
 
                 const target = this.socket.get(!isHost)
 
@@ -327,22 +355,16 @@ class ChatRoom {
         const getUser = this.clients.get(username)
         const userLoggedIn = await loginUser(username, password)
         let done = false;
-
+        
         if (ws.readyState === WebSocket.OPEN) {
-
+            
             if (!getUser && userLoggedIn === true) {
 
+                await addRoom(username, this.roomId);
+
                 this.clients.set(username, ws)
-                ws.send(JSON.stringify({type: "getMsg", msgObj: this.messages}))
+                ws.send(JSON.stringify({type: "getMsg", roomId: this.roomId, msgObj: this.messages}))
                 done = true;
-
-            } else if (getUser) {
-
-                ws.send(JSON.stringify({type: "error", error: "userAlreadyJoined"}));
-
-            } else if (userLoggedIn === false) {
-
-                ws.send(JSON.stringify({type: "error", error: "userInvalidCredentials"}));
             
             }
         
@@ -361,10 +383,9 @@ class ChatRoom {
 
             if (getUser.readyState === WebSocket.OPEN) {
                 
-                const finalMsg = `<${username}> ${msg}`
                 const timestamp = Date.now()
 
-                const messageObject = {roomId: this.roomId, username: username, message: finalMsg, timestamp: timestamp}
+                const messageObject = {username: username, message: msg, timestamp: timestamp}
 
                 this.messages.push(messageObject);
                 
@@ -383,10 +404,6 @@ class ChatRoom {
                 done = true;
 
             }
-
-        } else {
-
-            ws.send(JSON.stringify({type: "error", error: "userNotJoined"}));
 
         }
 
@@ -476,9 +493,11 @@ chatWss.on('connection', (ws, req) => {
         try {
 
             const data = JSON.parse(msg)
-            
-            if (data.roomId && typeof data.roomId === 'string' && data.roomId.length <= maxRoomIdLength) {
+
+            if (data.roomId && data.type && typeof data.type === 'string' && typeof data.roomId === 'string' && data.roomId.length <= maxRoomIdLength && data.type.length < maxMsgLength) {
                 
+                if (data.type === 'ping') return
+
                 if (!chatRooms.has(data.roomId)) {
                         
                     chatRooms.set(data.roomId, new ChatRoom(data.roomId))
@@ -491,7 +510,8 @@ chatWss.on('connection', (ws, req) => {
                 if (data.type === 'join' && data.username && data.password && typeof data.username === 'string' && typeof data.password === 'string' && data.username.length <= maxUsernameLength && data.password.length <= maxPasswordLength) {
                     
                     const joined = await chatRoom.join(ws, data.username, data.password);
-                    ws.send(JSON.stringify({type: "conf", confType: "joined", confBoolean: joined}));
+                    ws.send(JSON.stringify({type: "conf", confType: "joined", confBoolean: joined, with: {roomId: data.roomId, username: data.username, password: data.password}}));
+
                     if (joined === true) {
 
                         joinedRooms.add(chatRoom);
@@ -501,21 +521,39 @@ chatWss.on('connection', (ws, req) => {
                 } else if (data.type === 'leave' && data.username && typeof data.username === 'string' && data.username.length <= maxUsernameLength) {
                     
                     const left = chatRoom.leave(ws, data.username);
-                    ws.send(JSON.stringify({type: "conf", confType: "leave", confBoolean: left}));
+                    ws.send(JSON.stringify({type: "conf", confType: "leave", confBoolean: left, with: {roomId: data.roomId, username: data.username}}));
 
                 } else if (data.type === 'msg' && data.username && data.msg && typeof data.username === 'string' && typeof data.msg === 'string' && data.msg.length <= maxMsgLength && data.username.length <= maxUsernameLength) {
                 
                    const broadcasted = await chatRoom.broadcast(ws, data.username, data.msg);
-                   ws.send(JSON.stringify({type: "conf", confType: "broadcast", confBoolean: broadcasted}));
+                   ws.send(JSON.stringify({type: "conf", confType: "broadcast", confBoolean: broadcasted, with: {roomId: data.roomId, username: data.username}}));
                 
                 } else if (data.type === 'register' && data.username && data.password && typeof data.username === 'string' && typeof data.password === 'string' && data.username.length <= maxUsernameLength && data.password.length <= maxPasswordLength) {
 
                     const registered = await registerUser(data.username, data.password);
-                    ws.send(JSON.stringify({type: "conf", confType: "registered", confBoolean: registered}));
+                    ws.send(JSON.stringify({type: "conf", confType: "registered", confBoolean: registered, with: {roomId: data.roomId, username: data.username, password: data.password}}));
+                
+                } else if (data.type === 'getRooms' && data.username && data.password && typeof data.username === 'string' && typeof data.password === 'string' && data.username.length <= maxUsernameLength && data.password.length <= maxPasswordLength) {
+
+                    const userLoggedIn = await loginUser(data.username, data.password)
+
+                    if (userLoggedIn === true) {
+
+                        const rooms = await getRooms(data.username);
+
+                        for (const room of rooms) {
+
+                            await chatRooms.get(room)?.join(ws, data.username, data.password)
+
+                        }
+                                                                        
+                        ws.send(JSON.stringify({type: "getRooms"}));
+
+                    }
 
                 } else if (ws.readyState === WebSocket.OPEN) {
 
-                    ws.send(JSON.stringify({type: "error", error: 'requestLongOrMissArg'}));
+                    ws.send(JSON.stringify({type: "error", error: 'Request too long / missing arguements'}));
 
                 }
 
@@ -523,7 +561,7 @@ chatWss.on('connection', (ws, req) => {
 
         } catch (err) {
 
-            ws.send(JSON.stringify({type: "error", error: 'invalidMsg'}));
+            ws.send(JSON.stringify({type: "error", error: 'Message is invalid'}));
             
         }
 
@@ -546,7 +584,7 @@ wss.on('connection', (ws, req) => {
     const roomId = url.searchParams.get('room')
     const origin = req.headers.origin
 
-    if (typeof roomId === 'string' && roomId.length > maxRoomIdLength) {
+    if (roomId && typeof roomId === 'string' && roomId.length > maxRoomIdLength) {
 
         ws.close(1008, 'roomId too big')
         return
