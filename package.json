@@ -1,9 +1,10 @@
 {
     "name": "signaling-server",
     "version": "1.0.0",
-    "main": "otherHosting.js",
+    "main": "otherHostingv2.ts",
     "scripts": {
-        "start": "node otherHosting.js"
+        "start": "ts-node otherHostingv2.ts",
+        "build": "tsc"
     },
     "dependencies": {
         "bcrypt": "^5.1.0",
@@ -16,8 +17,11 @@
         "@types/bcrypt": "^6.0.0",
         "@types/dompurify": "^3.0.5",
         "@types/jsdom": "^30.0.0",
+        "@types/mongo-sanitize": "^1.0.3",
         "@types/node": "^26.2.0",
-        "@types/ws": "^8.18.1"
+        "@types/ws": "^8.18.1",
+        "ts-node": "^10.9.2",
+        "typescript": "^5.0.0"
     },
     "allowScripts": {
         "bcrypt@5.1.1": true
