@@ -4,6 +4,7 @@ import { randomBytes } from 'crypto';
 import DOMPurify from 'dompurify';
 import mongoSanitize from 'mongo-sanitize';
 import http from 'http';
+import https from 'https';
 import bcrypt from 'bcrypt';
 
 // TODO LIST:
@@ -43,17 +44,13 @@ type WsConnectionState = { sessionId: string | null; joinedChatRooms: Set<string
 
 class Application {
 
-    private wsService: WebsocketService;
-    private sqlServer: SQLServer;
+    private websocketService: WebsocketService;
     private connectionState = new WeakMap<WebSocket, WsConnectionState>();
-    private heartbeatIntervals: NodeJS.Timeout[] = [];
-
-    private static PING_INTERVAL_MS = 30_000;
 
     constructor() {
 
-        this.wsService = new WebsocketService();
-        this.sqlServer = new SQLServer();
+        this.websocketService = new WebsocketService();
+        new SQLServer();
 
     }
 
@@ -61,9 +58,10 @@ class Application {
 
         await SQLServer.WaitUntilReady();
 
-        this.wsService
-            .AddWsHandler('/chat', (ws, req) => this.HandleChatConnection(ws))
-            .AddWsHandler('/rtc', (ws, req) => this.HandleRtcConnection(ws))
+        this.websocketService
+            .AddHttpHandler('/turn-creds', WebsocketService.TurnCredsHandler)
+            .AddWsHandler('/chat', (websocket, httpRequest) => this.HandleChatConnection(websocket))
+            .AddWsHandler('/rtc', (websocket, httpRequest) => this.HandleRtcConnection(websocket))
             .StartListen(Number(process.env.PORT) || 3000);
 
         console.log("listening on port 3000")
@@ -72,97 +70,66 @@ class Application {
 
     public Destroy(): void {
 
-        this.heartbeatIntervals.forEach((interval) => clearInterval(interval));
-        this.heartbeatIntervals = [];
-
-    }
-
-    // shared helpers
-
-    private StartHeartbeat(sockets: Set<WebSocket>): void {
-
-        const interval = setInterval(() => {
-
-            sockets.forEach((ws: any) => {
-
-                if (ws.isAlive === false) {
-
-                    ws.terminate();
-                    sockets.delete(ws);
-                    return;
-
-                }
-
-                ws.isAlive = false;
-                ws.ping();
-
-            });
-
-        }, Application.PING_INTERVAL_MS);
-
-        this.heartbeatIntervals.push(interval);
+        this.websocketService.Destroy();
 
     }
 
     // chat route
 
-    private chatSockets = new Set<WebSocket>();
+    private HandleChatConnection(websocket: WebSocket): void {
 
-    private HandleChatConnection(ws: WebSocket): void {
+        this.connectionState.set(websocket, { sessionId: null, joinedChatRooms: new Set(), joinedRtcRooms: new Set() });
 
-        (ws as any).isAlive = true;
-        ws.addEventListener('pong', () => { (ws as any).isAlive = true; });
+        websocket.addEventListener('message', async (messageEvent: any) => {
 
-        this.chatSockets.add(ws);
-        if (this.chatSockets.size === 1) this.StartHeartbeat(this.chatSockets);
-
-        this.connectionState.set(ws, { sessionId: null, joinedChatRooms: new Set(), joinedRtcRooms: new Set() });
-
-        ws.addEventListener('message', async (event: any) => {
-
-            await this.DispatchChat(ws, event.data.toString());
+            await this.DispatchChat(websocket, messageEvent.data.toString());
 
         });
 
-        ws.addEventListener('close', async () => {
+        websocket.addEventListener('close', async () => {
 
-            this.chatSockets.delete(ws);
-            await this.CleanupChatConnection(ws);
+            await this.CleanupChatConnection(websocket);
 
         });
 
     }
 
-    private async DispatchChat(ws: WebSocket, rawString: string): Promise<void> {
+    private async DispatchChat(websocket: WebSocket, rawString: string): Promise<void> {
 
-        const rateCheck = WebsocketService.RateLimitCheck(ws);
-        if (Utils.IsErr(rateCheck)) { await Messages.ErrorMsg('rateLimit', rateCheck.returnData, ws, false); return; }
+        if (rawString.length > Config.WS_MAX_MESSAGE_LENGTH) return;
+
+        const rateCheck = WebsocketService.RateLimitCheck(websocket);
+        if (Utils.IsErr(rateCheck)) return;
 
         const parsed = IncomingValidator.ParseIncoming(rawString);
-        if (Utils.IsErr(parsed)) { await Messages.ErrorMsg('parse', parsed.returnData, ws, false); return; }
+        if (Utils.IsErr(parsed)) { await Messages.ErrorMsg('parse', parsed.returnData, websocket, false); return; }
 
-        const msg = parsed.returnData as IncomingMsg;
-        const state = this.connectionState.get(ws);
-        if (!state) return;
+        const incomingMsg = parsed.returnData as IncomingMsg;
+        const connState = this.connectionState.get(websocket);
+        if (!connState) return;
 
-        switch (msg.type) {
+        switch (incomingMsg.type) {
+
+            case 'ping':
+
+                return;
 
             case 'login': {
 
-                const validated = IncomingValidator.ValidateAuth(msg);
-                if (Utils.IsErr(validated)) { await Messages.ErrorMsg('login', validated.returnData, ws, false); return; }
+                const validated = IncomingValidator.ValidateAuth(incomingMsg);
+                if (Utils.IsErr(validated)) { await Messages.ErrorMsg('login', validated.returnData, websocket, false); return; }
 
                 const { username, password } = validated.returnData;
 
-                if (IncomingValidator.ValidateUsernameSize(username) === false) { await Messages.ErrorMsg('login', 'bad username or password', ws, false); return; }
-                if (IncomingValidator.ValidatePasswordSize(password) === false) { await Messages.ErrorMsg('login', 'bad username or password', ws, false); return; }
+                if (IncomingValidator.ValidateUsernameSize(username) === false) { await Messages.ErrorMsg('login', 'bad username or password', websocket, false); return; }
+                if (IncomingValidator.ValidatePasswordSize(password) === false) { await Messages.ErrorMsg('login', 'bad username or password', websocket, false); return; }
 
                 const loginResult = await SQLServer.LoginUser(username, password);
 
-                if (Utils.IsErr(loginResult)) { await Messages.ErrorMsg('login', loginResult.returnData, ws, false); return; }
+                if (Utils.IsErr(loginResult)) { await Messages.ErrorMsg('login', loginResult.returnData, websocket, false); return; }
 
-                state.sessionId = loginResult.returnData;
-                await Messages.AuthMsg('login', loginResult.returnData, ws, false);
+                connState.sessionId = loginResult.returnData;
+                await Messages.AuthMsg('login', loginResult.returnData, websocket, false);
 
                 return;
 
@@ -170,20 +137,20 @@ class Application {
 
             case 'register': {
 
-                const validated = IncomingValidator.ValidateAuth(msg);
-                if (Utils.IsErr(validated)) { await Messages.ErrorMsg('register', validated.returnData, ws, false); return; }
+                const validated = IncomingValidator.ValidateAuth(incomingMsg);
+                if (Utils.IsErr(validated)) { await Messages.ErrorMsg('register', validated.returnData, websocket, false); return; }
 
                 const { username, password } = validated.returnData;
 
-                if (IncomingValidator.ValidateUsernameSize(username) === false) { await Messages.ErrorMsg('register', 'bad username', ws, false); return; }
-                if (IncomingValidator.ValidatePasswordSize(password) === false) { await Messages.ErrorMsg('register', 'bad password', ws, false); return; }
+                if (IncomingValidator.ValidateUsernameSize(username) === false) { await Messages.ErrorMsg('register', 'bad username', websocket, false); return; }
+                if (IncomingValidator.ValidatePasswordSize(password) === false) { await Messages.ErrorMsg('register', 'bad password', websocket, false); return; }
 
                 const registerResult = await SQLServer.RegisterUser(username, password);
 
-                if (Utils.IsErr(registerResult)) { await Messages.ErrorMsg('register', registerResult.returnData, ws, false); return; }
+                if (Utils.IsErr(registerResult)) { await Messages.ErrorMsg('register', registerResult.returnData, websocket, false); return; }
 
-                state.sessionId = registerResult.returnData;
-                await Messages.AuthMsg('register', registerResult.returnData, ws, false);
+                connState.sessionId = registerResult.returnData;
+                await Messages.AuthMsg('register', registerResult.returnData, websocket, false);
 
                 return;
 
@@ -191,24 +158,24 @@ class Application {
 
             case 'joinChat': {
 
-                const validated = IncomingValidator.ValidateJoinChat(msg);
-                if (Utils.IsErr(validated)) { await Messages.ErrorMsg('joinChat', validated.returnData, ws, false); return; }
+                const validated = IncomingValidator.ValidateJoinChat(incomingMsg);
+                if (Utils.IsErr(validated)) { await Messages.ErrorMsg('joinChat', validated.returnData, websocket, false); return; }
 
                 const { sessionId, roomId } = validated.returnData;
-                if (!IncomingValidator.ValidateRoomId(roomId)) { await Messages.ErrorMsg('joinChat', 'bad roomId', ws, false); return; }
+                if (!IncomingValidator.ValidateRoomId(roomId)) { await Messages.ErrorMsg('joinChat', 'bad roomId', websocket, false); return; }
 
                 const session = await SessionStore.Validate(sessionId);
-                if (Utils.IsErr(session)) { await Messages.ErrorMsg('joinChat', session.returnData, ws, false); return; }
+                if (Utils.IsErr(session)) { await Messages.ErrorMsg('joinChat', session.returnData, websocket, false); return; }
 
                 const roomResult = await ChatRoom.Init(roomId);
-                if (Utils.IsErr(roomResult)) { await Messages.ErrorMsg('joinChat', roomResult.returnData, ws, false); return; }
+                if (Utils.IsErr(roomResult)) { await Messages.ErrorMsg('joinChat', roomResult.returnData, websocket, false); return; }
 
-                const room = roomResult.returnData as ChatRoom;
-                const joinResult = await room.JoinChat(sessionId, session.returnData, ws);
+                const chatRoom = roomResult.returnData as ChatRoom;
+                const joinResult = await chatRoom.JoinChat(sessionId, session.returnData, websocket);
 
-                if (Utils.IsErr(joinResult)) { await Messages.ErrorMsg('joinChat', joinResult.returnData, ws, false); return; }
+                if (Utils.IsErr(joinResult)) { await Messages.ErrorMsg('joinChat', joinResult.returnData, websocket, false); return; }
 
-                state.joinedChatRooms.add(roomId);
+                connState.joinedChatRooms.add(roomId);
 
                 return;
 
@@ -216,23 +183,23 @@ class Application {
 
             case 'leaveChat': {
 
-                const validated = IncomingValidator.ValidateLeaveChat(msg);
-                if (Utils.IsErr(validated)) { await Messages.ErrorMsg('leaveChat', validated.returnData, ws, false); return; }
+                const validated = IncomingValidator.ValidateLeaveChat(incomingMsg);
+                if (Utils.IsErr(validated)) { await Messages.ErrorMsg('leaveChat', validated.returnData, websocket, false); return; }
 
                 const { sessionId, roomId } = validated.returnData;
 
                 const session = await SessionStore.Validate(sessionId);
-                if (Utils.IsErr(session)) { await Messages.ErrorMsg('leaveChat', session.returnData, ws, false); return; }
+                if (Utils.IsErr(session)) { await Messages.ErrorMsg('leaveChat', session.returnData, websocket, false); return; }
 
                 const roomResult = await ChatRoom.Init(roomId);
-                if (Utils.IsErr(roomResult)) { await Messages.ErrorMsg('leaveChat', roomResult.returnData, ws, false); return; }
+                if (Utils.IsErr(roomResult)) { await Messages.ErrorMsg('leaveChat', roomResult.returnData, websocket, false); return; }
 
-                const room = roomResult.returnData as ChatRoom;
-                const leaveResult = await room.LeaveChat(sessionId, session.returnData);
+                const chatRoom = roomResult.returnData as ChatRoom;
+                const leaveResult = await chatRoom.LeaveChat(sessionId, session.returnData);
 
-                if (Utils.IsErr(leaveResult)) { await Messages.ErrorMsg('leaveChat', leaveResult.returnData, ws, false); return; }
+                if (Utils.IsErr(leaveResult)) { await Messages.ErrorMsg('leaveChat', leaveResult.returnData, websocket, false); return; }
 
-                state.joinedChatRooms.delete(roomId);
+                connState.joinedChatRooms.delete(roomId);
 
                 return;
 
@@ -240,22 +207,22 @@ class Application {
 
             case 'messageChat': {
 
-                const validated = IncomingValidator.ValidateMessageChat(msg);
-                if (Utils.IsErr(validated)) { await Messages.ErrorMsg('messageChat', validated.returnData, ws, false); return; }
+                const validated = IncomingValidator.ValidateMessageChat(incomingMsg);
+                if (Utils.IsErr(validated)) { await Messages.ErrorMsg('messageChat', validated.returnData, websocket, false); return; }
 
                 const { sessionId, roomId, message } = validated.returnData;
-                if (IncomingValidator.ValidateMessageSize(message) === false) { await Messages.ErrorMsg('messageChat', 'message bad size', ws, false); return; }
+                if (IncomingValidator.ValidateMessageSize(message) === false) { await Messages.ErrorMsg('messageChat', 'message bad size', websocket, false); return; }
 
                 const session = await SessionStore.Validate(sessionId);
-                if (Utils.IsErr(session)) { await Messages.ErrorMsg('messageChat', session.returnData, ws, false); return; }
+                if (Utils.IsErr(session)) { await Messages.ErrorMsg('messageChat', session.returnData, websocket, false); return; }
 
                 const roomResult = await ChatRoom.Init(roomId);
-                if (Utils.IsErr(roomResult)) { await Messages.ErrorMsg('messageChat', roomResult.returnData, ws, false); return; }
+                if (Utils.IsErr(roomResult)) { await Messages.ErrorMsg('messageChat', roomResult.returnData, websocket, false); return; }
 
-                const room = roomResult.returnData as ChatRoom;
-                const messageResult = await room.MessageChat(sessionId, session.returnData, message);
+                const chatRoom = roomResult.returnData as ChatRoom;
+                const messageResult = await chatRoom.MessageChat(sessionId, session.returnData, message);
 
-                if (Utils.IsErr(messageResult)) { await Messages.ErrorMsg('messageChat', messageResult.returnData, ws, false); return; }
+                if (Utils.IsErr(messageResult)) { await Messages.ErrorMsg('messageChat', messageResult.returnData, websocket, false); return; }
 
                 return;
 
@@ -263,7 +230,7 @@ class Application {
 
             default:
 
-                await Messages.ErrorMsg('dispatch', `unknown type "${msg.type}"`, ws, false);
+                await Messages.ErrorMsg('dispatch', `unknown type "${incomingMsg.type}"`, websocket, false);
                 return;
 
         }
@@ -272,67 +239,64 @@ class Application {
 
     // rtc route
 
-    private rtcSockets = new Set<WebSocket>();
+    private HandleRtcConnection(websocket: WebSocket): void {
 
-    private HandleRtcConnection(ws: WebSocket): void {
+        this.connectionState.set(websocket, { sessionId: null, joinedChatRooms: new Set(), joinedRtcRooms: new Set() });
 
-        (ws as any).isAlive = true;
-        ws.addEventListener('pong', () => { (ws as any).isAlive = true; });
+        websocket.addEventListener('message', async (messageEvent: any) => {
 
-        this.rtcSockets.add(ws);
-        if (this.rtcSockets.size === 1) this.StartHeartbeat(this.rtcSockets);
-
-        this.connectionState.set(ws, { sessionId: null, joinedChatRooms: new Set(), joinedRtcRooms: new Set() });
-
-        ws.addEventListener('message', async (event: any) => {
-
-            await this.DispatchRtc(ws, event.data.toString());
+            await this.DispatchRtc(websocket, messageEvent.data.toString());
 
         });
 
-        ws.addEventListener('close', async () => {
+        websocket.addEventListener('close', async () => {
 
-            this.rtcSockets.delete(ws);
-            await this.CleanupRtcConnection(ws);
+            await this.CleanupRtcConnection(websocket);
 
         });
 
     }
 
-    private async DispatchRtc(ws: WebSocket, rawString: string): Promise<void> {
+    private async DispatchRtc(websocket: WebSocket, rawString: string): Promise<void> {
 
-        const rateCheck = WebsocketService.RateLimitCheck(ws);
-        if (Utils.IsErr(rateCheck)) { await Messages.ErrorMsg('rateLimit', rateCheck.returnData, ws, false); return; }
+        if (rawString.length > Config.WS_MAX_MESSAGE_LENGTH) return;
+
+        const rateCheck = WebsocketService.RateLimitCheck(websocket);
+        if (Utils.IsErr(rateCheck)) return;
 
         const parsed = IncomingValidator.ParseIncoming(rawString);
-        if (Utils.IsErr(parsed)) { await Messages.ErrorMsg('parse', parsed.returnData, ws, false); return; }
+        if (Utils.IsErr(parsed)) { await Messages.ErrorMsg('parse', parsed.returnData, websocket, false); return; }
 
-        const msg = parsed.returnData as IncomingMsg;
-        const state = this.connectionState.get(ws);
-        if (!state) return;
+        const incomingMsg = parsed.returnData as IncomingMsg;
+        const connState = this.connectionState.get(websocket);
+        if (!connState) return;
 
-        switch (msg.type) {
+        switch (incomingMsg.type) {
+
+            case 'ping':
+
+                return;
 
             case 'joinRTC': {
 
-                const validated = IncomingValidator.ValidateJoinRTC(msg);
-                if (Utils.IsErr(validated)) { await Messages.ErrorMsg('joinRTC', validated.returnData, ws, false); return; }
+                const validated = IncomingValidator.ValidateJoinRTC(incomingMsg);
+                if (Utils.IsErr(validated)) { await Messages.ErrorMsg('joinRTC', validated.returnData, websocket, false); return; }
 
                 const { sessionId, roomId, wantsHost } = validated.returnData;
-                if (!IncomingValidator.ValidateRoomId(roomId)) { await Messages.ErrorMsg('joinRTC', 'bad roomId', ws, false); return; }
+                if (!IncomingValidator.ValidateRoomId(roomId)) { await Messages.ErrorMsg('joinRTC', 'bad roomId', websocket, false); return; }
 
                 const session = await SessionStore.Validate(sessionId);
-                if (Utils.IsErr(session)) { await Messages.ErrorMsg('joinRTC', session.returnData, ws, false); return; }
+                if (Utils.IsErr(session)) { await Messages.ErrorMsg('joinRTC', session.returnData, websocket, false); return; }
 
                 const roomResult = await SignalingRoom.Init(roomId);
-                if (Utils.IsErr(roomResult)) { await Messages.ErrorMsg('joinRTC', roomResult.returnData, ws, false); return; }
+                if (Utils.IsErr(roomResult)) { await Messages.ErrorMsg('joinRTC', roomResult.returnData, websocket, false); return; }
 
-                const room = roomResult.returnData as SignalingRoom;
-                const joinResult = await room.JoinRTC(sessionId, session.returnData, ws, wantsHost);
+                const signalingRoom = roomResult.returnData as SignalingRoom;
+                const joinResult = await signalingRoom.JoinRTC(sessionId, session.returnData, websocket, wantsHost);
 
-                if (Utils.IsErr(joinResult)) { await Messages.ErrorMsg('joinRTC', joinResult.returnData, ws, false); return; }
+                if (Utils.IsErr(joinResult)) { await Messages.ErrorMsg('joinRTC', joinResult.returnData, websocket, false); return; }
 
-                state.joinedRtcRooms.add(roomId);
+                connState.joinedRtcRooms.add(roomId);
 
                 return;
 
@@ -340,23 +304,23 @@ class Application {
 
             case 'leaveRTC': {
 
-                const validated = IncomingValidator.ValidateLeaveRTC(msg);
-                if (Utils.IsErr(validated)) { await Messages.ErrorMsg('leaveRTC', validated.returnData, ws, false); return; }
+                const validated = IncomingValidator.ValidateLeaveRTC(incomingMsg);
+                if (Utils.IsErr(validated)) { await Messages.ErrorMsg('leaveRTC', validated.returnData, websocket, false); return; }
 
                 const { sessionId, roomId } = validated.returnData;
 
                 const session = await SessionStore.Validate(sessionId);
-                if (Utils.IsErr(session)) { await Messages.ErrorMsg('leaveRTC', session.returnData, ws, false); return; }
+                if (Utils.IsErr(session)) { await Messages.ErrorMsg('leaveRTC', session.returnData, websocket, false); return; }
 
                 const roomResult = await SignalingRoom.Init(roomId);
-                if (Utils.IsErr(roomResult)) { await Messages.ErrorMsg('leaveRTC', roomResult.returnData, ws, false); return; }
+                if (Utils.IsErr(roomResult)) { await Messages.ErrorMsg('leaveRTC', roomResult.returnData, websocket, false); return; }
 
-                const room = roomResult.returnData as SignalingRoom;
-                const leaveResult = await room.LeaveRTC(sessionId, session.returnData);
+                const signalingRoom = roomResult.returnData as SignalingRoom;
+                const leaveResult = await signalingRoom.LeaveRTC(sessionId, session.returnData);
 
-                if (Utils.IsErr(leaveResult)) { await Messages.ErrorMsg('leaveRTC', leaveResult.returnData, ws, false); return; }
+                if (Utils.IsErr(leaveResult)) { await Messages.ErrorMsg('leaveRTC', leaveResult.returnData, websocket, false); return; }
 
-                state.joinedRtcRooms.delete(roomId);
+                connState.joinedRtcRooms.delete(roomId);
 
                 return;
 
@@ -364,21 +328,21 @@ class Application {
 
             case 'messageRTC': {
 
-                const validated = IncomingValidator.ValidateMessageRTC(msg);
-                if (Utils.IsErr(validated)) { await Messages.ErrorMsg('messageRTC', validated.returnData, ws, false); return; }
+                const validated = IncomingValidator.ValidateMessageRTC(incomingMsg);
+                if (Utils.IsErr(validated)) { await Messages.ErrorMsg('messageRTC', validated.returnData, websocket, false); return; }
 
                 const { sessionId, roomId, rtcType, rtcObj } = validated.returnData;
 
                 const session = await SessionStore.Validate(sessionId);
-                if (Utils.IsErr(session)) { await Messages.ErrorMsg('messageRTC', session.returnData, ws, false); return; }
+                if (Utils.IsErr(session)) { await Messages.ErrorMsg('messageRTC', session.returnData, websocket, false); return; }
 
                 const roomResult = await SignalingRoom.Init(roomId);
-                if (Utils.IsErr(roomResult)) { await Messages.ErrorMsg('messageRTC', roomResult.returnData, ws, false); return; }
+                if (Utils.IsErr(roomResult)) { await Messages.ErrorMsg('messageRTC', roomResult.returnData, websocket, false); return; }
 
-                const room = roomResult.returnData as SignalingRoom;
-                const messageResult = await room.MessageRTC(sessionId, session.returnData, rtcType, rtcObj);
+                const signalingRoom = roomResult.returnData as SignalingRoom;
+                const messageResult = await signalingRoom.MessageRTC(sessionId, session.returnData, rtcType, rtcObj);
 
-                if (Utils.IsErr(messageResult)) { await Messages.ErrorMsg('messageRTC', messageResult.returnData, ws, false); return; }
+                if (Utils.IsErr(messageResult)) { await Messages.ErrorMsg('messageRTC', messageResult.returnData, websocket, false); return; }
 
                 return;
 
@@ -386,7 +350,7 @@ class Application {
 
             default:
 
-                await Messages.ErrorMsg('dispatch', `unknown type "${msg.type}"`, ws, false);
+                await Messages.ErrorMsg('dispatch', `unknown type "${incomingMsg.type}"`, websocket, false);
                 return;
 
         }
@@ -395,20 +359,20 @@ class Application {
 
     // shared cleanup
 
-    private async CleanupChatConnection(ws: WebSocket): Promise<void> {
+    private async CleanupChatConnection(websocket: WebSocket): Promise<void> {
 
-        const state = this.connectionState.get(ws);
-        if (!state || !state.sessionId) return;
+        const connState = this.connectionState.get(websocket);
+        if (!connState || !connState.sessionId) return;
 
-        const session = await SessionStore.Validate(state.sessionId);
+        const session = await SessionStore.Validate(connState.sessionId);
         if (Utils.IsErr(session)) return;
 
-        for (const roomId of state.joinedChatRooms) {
+        for (const roomId of connState.joinedChatRooms) {
 
             const roomResult = await ChatRoom.Init(roomId);
             if (!Utils.IsErr(roomResult)) {
 
-                await (roomResult.returnData as ChatRoom).LeaveChat(state.sessionId, session.returnData);
+                await (roomResult.returnData as ChatRoom).LeaveChat(connState.sessionId, session.returnData);
 
             }
 
@@ -416,20 +380,20 @@ class Application {
 
     }
 
-    private async CleanupRtcConnection(ws: WebSocket): Promise<void> {
+    private async CleanupRtcConnection(websocket: WebSocket): Promise<void> {
 
-        const state = this.connectionState.get(ws);
-        if (!state || !state.sessionId) return;
+        const connState = this.connectionState.get(websocket);
+        if (!connState || !connState.sessionId) return;
 
-        const session = await SessionStore.Validate(state.sessionId);
+        const session = await SessionStore.Validate(connState.sessionId);
         if (Utils.IsErr(session)) return;
 
-        for (const roomId of state.joinedRtcRooms) {
+        for (const roomId of connState.joinedRtcRooms) {
 
             const roomResult = await SignalingRoom.Init(roomId);
             if (!Utils.IsErr(roomResult)) {
 
-                await (roomResult.returnData as SignalingRoom).LeaveRTC(state.sessionId, session.returnData);
+                await (roomResult.returnData as SignalingRoom).LeaveRTC(connState.sessionId, session.returnData);
 
             }
 
@@ -457,9 +421,11 @@ class Config {
     public static readonly SESSION_TOKEN_BYTES = 32;
     public static readonly SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 
-    public static readonly WS_RATE_LIMIT = 5; // every second
+    public static readonly WS_RATE_LIMIT = 10; // every second
     public static readonly WS_RATE_WINDOW_MS = 1000;
     public static readonly WS_TIMEOUT_MS = 5000; // ms
+    public static readonly WS_PING_INTERVAL_MS = 30_000; // ms
+    public static readonly WS_MAX_MESSAGE_LENGTH = 100_000; // bytes
     
     public static readonly ROOM_ID_MAX_LENGTH: number = 100;
 
@@ -720,36 +686,37 @@ class IncomingValidator {
     }
 
 }
-
 class WebsocketService {
 
     private static rateLimitMap = new WeakMap<WebSocket, number[]>();
+    private static SERVER_URL: string | undefined = process.env.SERVERURL;
 
     private server: http.Server;
     private httpRoutes = new Map<string, HttpHandler>();
-    private wsRoutes = new Map<string, { wss: WebSocketServer; handler: WsHandler }>();
+    private wsRoutes = new Map<string, { websocketServer: WebSocketServer; handler: WsHandler; sockets: Set<WebSocket> }>();
+    private heartbeatIntervals: NodeJS.Timeout[] = [];
 
-    private fallbackHttp: HttpHandler = (_req, res) => {
+    private fallbackHttp: HttpHandler = (httpRequest, httpResponse) => {
 
-        res.writeHead(404);
-        res.end("Whoops you're not on a websocket bogo");
+        httpResponse.writeHead(404);
+        httpResponse.end("Whoops you're not on a websocket bogo");
 
     };
 
     constructor() {
 
-        this.server = http.createServer((req, res) => {
+        this.server = http.createServer((httpRequest, httpResponse) => {
 
-            const pathname = req.url ? new URL(req.url, 'http://localhost').pathname : undefined;
+            const pathname = httpRequest.url ? new URL(httpRequest.url, 'http://localhost').pathname : undefined;
 
             const handler = (pathname && this.httpRoutes.get(pathname)) || this.fallbackHttp;
-            handler(req, res);
+            handler(httpRequest, httpResponse);
 
         });
 
-        this.server.on('upgrade', (req, socket, head) => {
+        this.server.on('upgrade', (upgradeRequest, socket, head) => {
 
-            const pathname = new URL(req.url ?? '', 'http://localhost').pathname;
+            const pathname = new URL(upgradeRequest.url ?? '', 'http://localhost').pathname;
             const websocketRoute = this.wsRoutes.get(pathname);
 
             if (!websocketRoute) {
@@ -759,10 +726,57 @@ class WebsocketService {
 
             }
 
-            websocketRoute.wss.handleUpgrade(req, socket, head, (ws : any) => {
-            
-                websocketRoute.handler(ws, req);
-            
+            if (WebsocketService.IsOriginAllowed(upgradeRequest.headers.origin) === false) {
+
+                socket.destroy();
+                return;
+
+            }
+
+            websocketRoute.websocketServer.handleUpgrade(upgradeRequest, socket, head, (websocket : any) => {
+
+                websocket.isAlive = true;
+                websocket.addEventListener('pong', () => { websocket.isAlive = true; });
+
+                websocketRoute.sockets.add(websocket);
+                websocket.addEventListener('close', () => { websocketRoute.sockets.delete(websocket); });
+
+                websocketRoute.handler(websocket, upgradeRequest);
+
+            });
+
+        });
+
+    }
+
+    private static IsOriginAllowed(origin: string | undefined): boolean {
+
+        return origin === undefined || origin === WebsocketService.SERVER_URL;
+
+    }
+
+    public static TurnCredsHandler(httpRequest: http.IncomingMessage, httpResponse: http.ServerResponse): void {
+
+        const requestOptions = {
+
+            hostname: 'speed.cloudflare.com',
+            path: '/turn-creds',
+            headers: {
+                'Origin': 'https://speed.cloudflare.com',
+                'Referer': 'https://speed.cloudflare.com/'
+            }
+
+        };
+
+        https.get(requestOptions, (httpsResponse) => {
+
+            let responseData = '';
+            httpsResponse.on('data', chunk => responseData += chunk);
+            httpsResponse.on('end', () => {
+
+                httpResponse.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+                httpResponse.end(responseData);
+
             });
 
         });
@@ -826,10 +840,10 @@ class WebsocketService {
 
             await Promise.all(
 
-                Array.from(sockets).map(async (ws) => {
+                Array.from(sockets).map(async (socket) => {
 
-                    const check = await this.CheckWebsocket(ws);
-                    if (!Utils.IsErr(check)) ws.send(stringifiedMsg);
+                    const check = await this.CheckWebsocket(socket);
+                    if (!Utils.IsErr(check)) socket.send(stringifiedMsg);
 
                 })
 
@@ -846,27 +860,51 @@ class WebsocketService {
 
     }
 
-    public static RateLimitCheck(ws: WebSocket): Res {
+    public static RateLimitCheck(socket: WebSocket): Res {
 
         const timeNow = Date.now();
-        const timestamps = this.rateLimitMap.get(ws) ?? [];
+        const timestamps = this.rateLimitMap.get(socket) ?? [];
 
         const recent = timestamps.filter((time) => timeNow - time < Config.WS_RATE_WINDOW_MS);
 
         if (recent.length >= Config.WS_RATE_LIMIT) {
 
-            this.rateLimitMap.set(ws, recent);
+            this.rateLimitMap.set(socket, recent);
             return Utils.Err("WS ERROR: Rate limit reached");
 
         }
 
         recent.push(timeNow);
-        this.rateLimitMap.set(ws, recent);
+        this.rateLimitMap.set(socket, recent);
 
         return Utils.Ok();
 
     }
 
+    private StartHeartbeat(sockets: Set<WebSocket>, intervalMs: number): void {
+
+        const interval = setInterval(() => {
+
+            sockets.forEach((socket: any) => {
+
+                if (socket.isAlive === false) {
+
+                    socket.terminate();
+                    sockets.delete(socket);
+                    return;
+
+                }
+
+                socket.isAlive = false;
+                socket.ping();
+
+            });
+
+        }, intervalMs);
+
+        this.heartbeatIntervals.push(interval);
+
+    }
 
     public AddHttpHandler(pathname: string, handler: HttpHandler): this {
 
@@ -877,7 +915,11 @@ class WebsocketService {
 
     public AddWsHandler(pathname: string, handler: WsHandler): this {
 
-        this.wsRoutes.set(pathname, { wss: new WebSocketServer({ noServer: true }), handler });
+        const sockets = new Set<WebSocket>();
+
+        this.wsRoutes.set(pathname, { websocketServer: new WebSocketServer({ noServer: true }), handler, sockets });
+        this.StartHeartbeat(sockets, Config.WS_PING_INTERVAL_MS);
+
         return this;
 
     }
@@ -887,6 +929,15 @@ class WebsocketService {
         this.server.listen(port);
         return this;
   
+    }
+
+    public Destroy(): void {
+
+        this.heartbeatIntervals.forEach((interval) => clearInterval(interval));
+        this.heartbeatIntervals = [];
+
+        this.server.close();
+
     }
 
 }
@@ -1542,3 +1593,6 @@ class ChatRoom extends Room {
     }
 
 }
+
+const application = new Application();
+application.Start().catch(console.error);
